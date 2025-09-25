@@ -1,5 +1,6 @@
 import yargs from 'yargs';
 import net from 'net';
+import dgram from 'dgram';
 import readline from 'readline';
 import { hideBin } from 'yargs/helpers';
 import Discovery from './Discovery.js';
@@ -30,7 +31,36 @@ function handleNewPeer(peer){
 }
 
 
+function heartbeat(){
+    const heartbeatBroadcast = dgram.createSocket('udp4')
+    
 
+    for(peer in knownPeers.values()){
+        if(peer.id == myTcpPort) continue;
+        const message = Buffer.from(`${peer.id}`)
+        const reply = Buffer.from(`${myID}`)
+        
+
+        heartbeatBroadcast.send(message ,  peer.port , peer.address)
+
+        setTimeout(() , 5000);
+        heartbeatBroadcast.on('message' , (msg , rfinfo)=>{
+            if(msg.toString() == myID){
+                heartbeatBroadcast.send(reply ,  peer.port , peer.address)
+            }
+            if(msg.toString() == peer.id){
+                //
+            }else{
+                console.log(`${peer.id} disconnected`);
+                knownPeers.delete(peer.id)
+            }
+        })  
+    }
+
+    setTimeout(heartbeat , 3000)
+}
+
+//Listner
 const nodeListner = net.createServer((socket)=>{
     
     socket.on('data' , (data)=>{
@@ -54,6 +84,7 @@ nodeListner.listen(0 , ()=>{
     
 })
 
+//Broadcaster
 function BroadcastMessage(messageText){
     
     for(const peer of knownPeers.values()){
