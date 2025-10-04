@@ -1,88 +1,138 @@
 import yargs from 'yargs';
 import net from 'net';
-import dgram from 'dgram';
 import readline from 'readline';
 import { hideBin } from 'yargs/helpers';
 import Discovery from './Discovery.js';
 import HeartBeat from './heartbeat.js';
+import { CONFIG } from './config.js';
 
+// Wrap in async function for top-level await
+async function startApp() {
+    const argv = await yargs(hideBin(process.argv))
+        .option('u', {
+            alias: 'username',
+            type: 'string',
+            demandOption: true,
+            describe: 'Your username'
+        })
+        .parse();
 
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        prompt: "You: "
+    });
 
+    const knownPeers = new Map();
+    const myID = argv.username;
+    const activeClients = new Set();
+    let myTcpPort;
+    let discovery;
+    let heartbeat;
 
-
-//Taking username from terminal using yargs
-const argv = yargs(hideBin(process.argv)).option('u' , {alias: 'username' , type:'string' , demandOption:true}).argv;
-
-const rl = readline.createInterface({
-    input:process.stdin,
-    output:process.stdout,
-    prompt:"You: "
-})
-
-const knownPeers = new Map()
-const myID = argv.username
-let myTcpPort;
-
-//This function will be used when new peers are found
-function handleNewPeer(peer){
-    if(!knownPeers.has(peer.id)){
-        console.log(`Discovered ${peer.id}: ${peer.address}:${peer.port}`);
+    // Handle new peer discovery
+    function handleNewPeer(peer) {
+        if (peer.id === myID) return;
+        if (!knownPeers.has(peer.id)) {
+            console.log(`\n[System] ${peer.id} joined (${peer.address}:${peer.port})`);
+            rl.prompt(true);
+        }
+        knownPeers.set(peer.id, peer);
     }
-    knownPeers.set(peer.id , peer)
-}
 
-
-//Listner
-const nodeListner = net.createServer((socket)=>{
-    
-    socket.on('data' , (data)=>{
+    // TCP Server - Listen for incoming messages and heartbeats
+    const tcpServer = net.createServer((socket) => {
+        let buffer = '';
         
-        const message = JSON.parse(data.toString());
-        console.log(`\n${message.id} : ${message.text}`);
-        rl.prompt()
-    })
-})
-rl.on('line' , (line)=>{
-    BroadcastMessage(line.trim());
-    rl.prompt()
-})
+        socket.on('data', (data) => {
+            buffer += data.toString();
+            let boundary = buffer.indexOf('\n');
+            while (boundary !== -1) {
+                const messageStr = buffer.slice(0, boundary);
+                buffer = buffer.slice(boundary + 1);
+                    const message = JSON.parse(messageStr);
+                    if (message.type === 'chat') {
+                        if (process.stdout.isTTY) {
+                            readline.clearLine(process.stdout, 0);
+                            readline.cursorTo(process.stdout, 0);
+                        }
+                        console.log(`[${message.id}] ${message.text}`);
+                        rl.prompt(true);
+                    } else if (message.type === 'ping' || message.type === 'pong') {
+                        heartbeat.handleMessage(message, socket.remoteAddress, socket.remotePort);
+                    }
+                boundary = buffer.indexOf('\n');
+            }
+        });
+    });
 
-nodeListner.listen(0 , ()=>{
-    myTcpPort = nodeListner.address().port;
-    console.log(`Node listening to port ${myTcpPort}`);
+    // Handle user input
+    rl.on('line', (line) => {
+        const text = line.trim();
+        if (text.length === 0) {
+            rl.prompt();
+            return;
+        }
+        if (text.startsWith('/')) {
+            handleCommand(text);
+        } else {
+            broadcastMessage(text);
+        }
+        rl.prompt();
+    });
 
-    const discovery = new Discovery(myID , myTcpPort , handleNewPeer)
-    discovery.start()
-    
+    // Broadcast message to all peers
+    function broadcastMessage(text) {
+        for (const peer of knownPeers.values()) {
+            if (peer.id === myID) continue;
+            const client = net.createConnection({
+                port: peer.port,
+                host: peer.address,
+                timeout: 3000
+            }, () => {
+                const message = JSON.stringify({
+                    type: 'chat',
+                    id: myID,
+                    text: text
+                }) + '\n';
+                client.write(message, () => {
+                    client.once('drain', () => {
+                        console.log(`[Chat] Message sent to ${peer.id}`);
+                        client.end();
+                    });
+                });
+            });
 
-    const heartbeat = new HeartBeat(myID , knownPeers)
-    heartbeat.start()
-})
+            client.on('error', (err) => {
+                client.destroy();
+            });
 
-nodeListner.on("error" , (err)=>{
-    console.log(err);
-    
-})
-
-//Broadcaster
-function BroadcastMessage(messageText){
-    
-    for(const peer of knownPeers.values()){
-        if(peer.id == myID) continue;
-
-        const nodeMessenger = net.createConnection({port:peer.port , host:peer.address} , ()=>{
-            
-            const message = {id:myID , text:messageText};
-            nodeMessenger.write(JSON.stringify(message) , ()=>{
-                nodeMessenger.end();
-            })
-        })
-
-        nodeMessenger.on('error' , (err)=>{
-            console.log(err);
-            
-        })
+            client.on('timeout', () => {
+                client.destroy();
+            });
+        }
     }
+
+    // Start the application
+    tcpServer.listen(0, () => {
+        myTcpPort = tcpServer.address().port;
+        console.log(`[System] Listening on port ${myTcpPort}`);
+
+        // Start discovery 
+        discovery = new Discovery(myID, myTcpPort, handleNewPeer, knownPeers);
+        discovery.start();
+        
+        // Start heartbeat 
+        heartbeat = new HeartBeat(myID, knownPeers, (peerID) => {
+            console.log(`\n[System] ${peerID} disconnected`);
+            rl.prompt(true);
+        });
+        heartbeat.start();
+        
+        rl.prompt();
+    });
+
+    // Handle Ctrl+C
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
 }
-
-

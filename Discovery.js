@@ -1,49 +1,60 @@
+import dgram from 'dgram';
+import { CONFIG } from './config.js';
 
-import dgram from 'dgram'
-const BROADCAST_PORT = 4000
-
-export default class Discovery{
-    constructor(peerID , peerport , onPeerFound){
-        this.peerID = peerID,
-        this.peerport = peerport,
-        this.onPeerFound = onPeerFound
-
-
-        this.socket = dgram.createSocket({type:'udp4' , reuseAddr:true});
+export default class Discovery {
+    constructor(peerID, peerPort, onPeerFound, knownPeers) {
+        this.peerID = peerID;
+        this.peerPort = peerPort;
+        this.onPeerFound = onPeerFound;
+        this.knownPeers = knownPeers;
+        this.socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+        this.intervalID = null;
     }
 
-
-    start(){
-        this.socket.bind(BROADCAST_PORT  , ()=>{
-            this.socket.setBroadcast(true),
-            console.log(`Discovery port listening on port:${BROADCAST_PORT}`);
-            
-            setInterval(()=>{
+    start() {
+        this.socket.bind(CONFIG.BROADCAST_PORT, '0.0.0.0', () => {
+            this.socket.setBroadcast(true);
+            console.log(`[Discovery] ${this.peerID} listening on port ${CONFIG.BROADCAST_PORT}`);
+            this.sendBroadcast();
+            this.intervalID = setInterval(() => {
                 this.sendBroadcast();
-            } , 3000)
-        })
+            }, CONFIG.BROADCAST_INTERVAL);
+        });
 
-        this.socket.on('message' , (message , rfinfo)=>{
-            const discoveredPeer = JSON.parse(message.toString());
+        this.socket.on('message', (message, rinfo) => {
+                const discoveredPeer = JSON.parse(message.toString());
+                if (discoveredPeer.id === this.peerID) return;
+                if (!discoveredPeer.id || !discoveredPeer.port) return;
 
-            if(discoveredPeer.id === this.peerID) return;
 
+                const existingPeer = this.knownPeers.get(discoveredPeer.id);
+                if (!existingPeer || existingPeer.port !== discoveredPeer.port || existingPeer.address !== rinfo.address) {
+                    console.log(`[Discovery] ${this.peerID} discovered ${discoveredPeer.id} at ${rinfo.address}:${discoveredPeer.port}`);
+                }
 
-            this.onPeerFound({
-                id:discoveredPeer.id,
-                port:discoveredPeer.port,
-                address:rfinfo.address
-            })
-        })
+                this.onPeerFound({
+                    id: discoveredPeer.id,
+                    port: discoveredPeer.port,
+                    address: rinfo.address
+                });
+        });
+
+        this.socket.on('error', (err) => {
+            console.error('Discovery Socket error:', err.message);
+        });
     }
 
-
-    sendBroadcast(){
+    sendBroadcast() {
         const message = Buffer.from(JSON.stringify({
-            id:this.peerID,
-            port:this.peerport
-        }))
+            id: this.peerID,
+            port: this.peerPort
+        }));
 
-        this.socket.send(message , 0 , message.length , BROADCAST_PORT , '255.255.255.255');
+        this.socket.send(message, CONFIG.BROADCAST_PORT, '255.255.255.255', (err) => {
+            if (err) {
+                console.error('Discovery Broadcast failed:', err.message);
+            }
+        });
     }
+
 }
